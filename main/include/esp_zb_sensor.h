@@ -31,9 +31,11 @@
 
 /* HLK-LD2450 sensor configuration */
 #define LD2450_UART_NUM         UART_NUM_1
-#define LD2450_TX_PIN           4
-#define LD2450_RX_PIN           5
+#define LD2450_TX_PIN           5
+#define LD2450_RX_PIN           4
 #define LD2450_BAUD_RATE        256000
+
+#define LD2450_VERSION_ATTR_ID 0x04 // test
 
 #define ESP_ZB_ZED_CONFIG()                                         \
     {                                                               \

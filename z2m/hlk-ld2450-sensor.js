@@ -6,6 +6,8 @@ const CUSTOM_CLUSTER_ID = 0xFC00;
 const CUSTOM_ATTRIBUTE_ID = 0x0001;
 const ENDPOINT = 10;
 
+const LD2450_VERSION_ATTR_ID = 0x04;
+
 export default {
     zigbeeModel: ['esp32h2'],
     model: 'CUSTOM_DEVICE',
@@ -22,6 +24,7 @@ export default {
             ID: 0xFC00,
             attributes: {
                 customByte: {ID: 0x0001, type: 0x20},
+                firmwareVersion: {ID: LD2450_VERSION_ATTR_ID, type: 0x42},
             },
             commands: {},
             commandsResponse: {},
@@ -35,6 +38,15 @@ export default {
             valueMin: 0,
             valueMax: 255,
             endpoint: "custom",
+        }),
+
+        m.text({
+            name: "LD2450_firmware_version",
+            cluster: "customCluster",
+            attribute: "firmwareVersion",
+            description: "LD2450 Radar Firmware Version",
+            endpoint: "custom",
+            //access: 'STATE',
         }),
     ],
 
@@ -52,6 +64,12 @@ export default {
                 minimumReportInterval: 1,
                 maximumReportInterval: 3600,
                 reportableChange: 1
+            },
+            {
+                attribute: "firmwareVersion",
+                minimumReportInterval: 1,
+                maximumReportInterval: 86400,
+                reportableChange: 0
             }
         ]);
     },

@@ -31,6 +31,167 @@
 static const char *TAG = "ESP_ZB_SENSOR";
 
 /********************* Define functions **************************/
+
+// test firmware - start
+
+#include "driver/uart.h"
+#include "driver/gpio.h"
+
+static void ld2450_uart_init(void)
+{
+    uart_config_t uart_config = {
+        .baud_rate = LD2450_BAUD_RATE,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    ESP_ERROR_CHECK(uart_driver_install(LD2450_UART_NUM, 2048, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(LD2450_UART_NUM, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(LD2450_UART_NUM, LD2450_TX_PIN, LD2450_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_LOGI(TAG, "LD2450 UART initialized");
+}
+
+static bool ld2450_enter_config_mode(void)
+{
+    uint8_t enable_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xFF, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
+    uint8_t response[64];
+    int len;
+
+    ESP_LOGI(TAG, "Entering LD2450 configuration mode...");
+    uart_flush_input(LD2450_UART_NUM);
+
+    uart_write_bytes(LD2450_UART_NUM, (const char*)enable_cmd, sizeof(enable_cmd));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+    if (len > 0) {
+        ESP_LOGI(TAG, "Config mode response (%d bytes):", len);
+        for (int i = 0; i < len; i++) {
+            printf("%02x ", response[i]);
+        }
+        printf("\n");
+        return true;
+    } else {
+        ESP_LOGW(TAG, "No response to config mode command");
+        return false;
+    }
+}
+
+static bool ld2450_exit_config_mode(void)
+{
+    uint8_t end_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFE, 0x00, 0x04, 0x03, 0x02, 0x01};
+    uint8_t response[64];
+    int len;
+
+    ESP_LOGI(TAG, "Exiting LD2450 configuration mode...");
+
+    uart_write_bytes(LD2450_UART_NUM, (const char*)end_cmd, sizeof(end_cmd));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+    if (len > 0) {
+        ESP_LOGI(TAG, "Exit config mode response (%d bytes):", len);
+        for (int i = 0; i < len; i++) {
+            printf("%02x ", response[i]);
+        }
+        printf("\n");
+        return true;
+    } else {
+        ESP_LOGW(TAG, "No response to exit config mode command");
+        return false;
+    }
+}
+
+static bool ld2450_read_firmware_version(char *version_str, size_t max_len)
+{
+    uint8_t fw_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA0, 0x00, 0x04, 0x03, 0x02, 0x01};
+    uint8_t response[64];
+    int len;
+    bool success = false;
+
+    ESP_LOGI(TAG, "Reading LD2450 firmware version...");
+
+    uart_write_bytes(LD2450_UART_NUM, (const char*)fw_cmd, sizeof(fw_cmd));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+    ESP_LOGI(TAG, "Firmware response received: %d bytes", len);
+
+    if (len > 0) {
+        ESP_LOGD(TAG, "Full firmware response dump:");
+        for (int i = 0; i < len; i++) {
+            printf("%02x ", response[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+        printf("\n");
+
+        if (len >= 18) {
+            uint8_t major = response[13];
+            uint8_t minor = response[12];
+            char build[16];
+            snprintf(build, sizeof(build), "%02x%02x%02x%02x",
+                    response[17], response[16], response[15], response[14]);
+
+            snprintf(version_str, max_len, "%d.%02d.%s", major, minor, build);
+            ESP_LOGI(TAG, "LD2450 Firmware Version: %s", version_str);
+            success = true;
+        } else {
+            ESP_LOGW(TAG, "Response too short for firmware version parsing (need 18+ bytes, got %d)", len);
+        }
+    } else {
+        ESP_LOGW(TAG, "No response to firmware version request");
+    }
+
+    return success;
+}
+
+static void ld2450_update_zigbee_fw_version_attr(const char *version_str)
+{
+    if (version_str == NULL) {
+        ESP_LOGW(TAG, "Invalid firmware version string");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Updating Zigbee attribute with firmware version: %s", version_str);
+
+    // prepare firmware version data
+    uint8_t data[32];
+    size_t len = strlen(version_str);
+    if (len > sizeof(data) - 1) {
+        len = sizeof(data) - 1;
+    }
+
+    data[0] = len;
+    memcpy(&data[1], version_str, len);
+
+    // update attr
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        LD2450_VERSION_ATTR_ID,
+        data,
+        false
+    );
+}
+
+static void ld2450_get_fw_version_and_update_zigbee(void)
+{
+    char version_str[32] = {0};
+
+    if (ld2450_enter_config_mode()) {
+        if (ld2450_read_firmware_version(version_str, sizeof(version_str))) {
+            ld2450_update_zigbee_fw_version_attr(version_str);
+        }
+        ld2450_exit_config_mode();
+    }
+}
+
+// test firmware - end
+
 static esp_err_t deferred_driver_init(void)
 {
     static bool is_inited = false;
@@ -40,7 +201,6 @@ static esp_err_t deferred_driver_init(void)
     }
     return is_inited ? ESP_OK : ESP_FAIL;
 }
-
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask)
 {
@@ -123,6 +283,9 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
                     uint8_t color_value = *(uint8_t *)(message->attribute.data.value);
                     light_driver_set_color_RGB(color_value, 255, 0);
                     light_driver_set_power(true);
+
+                    //ld2450_uart_init(); // test firmware
+                    //ld2450_read_firmware_version(); // test firmware
                 }
                 else {
                     ESP_LOGW(TAG, "Invalid attribute id");
@@ -220,6 +383,12 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x01, ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &custom_value);
     esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x02, ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, custom_string);
     esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x03, ESP_ZB_ZCL_ATTR_TYPE_32BIT_ARRAY, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, custom_array);
+
+    char fw_version[32] = {0};
+    fw_version[0] = 0;
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, LD2450_VERSION_ATTR_ID, ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING,
+                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY, fw_version);
+
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     //
 
@@ -258,13 +427,19 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_stack_main_loop();
 }
 
-void app_main(void)
-{
+void app_main(void) {
     esp_zb_platform_config_t config = {
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
     };
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
+
+    ld2450_uart_init();
+
     xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
+
+    vTaskDelay(pdMS_TO_TICKS(5000)); // wait until zigbee init
+    ld2450_get_fw_version_and_update_zigbee();
 }
+
