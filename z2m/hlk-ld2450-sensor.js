@@ -25,6 +25,8 @@ export default {
             attributes: {
                 customByte: {ID: 0x0001, type: 0x20},
                 firmwareVersion: {ID: LD2450_VERSION_ATTR_ID, type: 0x42},
+
+                target_1_x: {ID: 0x0005, type: 0x29},
             },
             commands: {},
             commandsResponse: {},
@@ -47,6 +49,16 @@ export default {
             description: "LD2450 Radar Firmware Version",
             endpoint: "custom",
             //access: 'STATE',
+        }),
+
+        m.numeric({
+            name: "target_1_x",
+            cluster: "customCluster",
+            attribute: "target_1_x",
+            description: "target_1_x",
+            valueMin: 0,
+            valueMax: 255,
+            endpoint: "custom",
         }),
     ],
 

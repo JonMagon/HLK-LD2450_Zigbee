@@ -213,6 +213,284 @@ static void ld2450_get_fw_version_and_update_zigbee(void)
 
 // test firmware - end
 
+// test read data - start
+
+static void update_led_color(uint16_t distance)
+{
+    const double MAX_DISTANCE = 4000.0f; // 4m
+
+    double normalized_distance = distance / MAX_DISTANCE;
+    if (normalized_distance > 1.0f) normalized_distance = 1.0f;
+
+    uint8_t green = (uint8_t)(255 * normalized_distance);
+    uint8_t red = (uint8_t)(255 * (1.0f - normalized_distance));
+
+    light_driver_set_color_RGB(red, green, 0);
+}
+
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t speed;
+    uint16_t distance;
+    uint8_t target_id;
+} radar_data_t;
+
+static QueueHandle_t radar_data_queue = NULL;
+
+static TimerHandle_t zigbee_update_timer = NULL;
+
+static void update_zigbee_attributes(const radar_data_t *data)
+{
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        0x05,
+        &data->x,
+        false
+    );
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        0x06,
+        &data->y,
+        false
+    );
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        0x07,
+        &data->speed,
+        false
+    );
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        0x08,
+        &data->distance,
+        false
+    );
+
+    report_attribute_to_coordinator(0x05);
+    //report_attribute_to_coordinator(0x06);
+    //report_attribute_to_coordinator(0x07);
+    //report_attribute_to_coordinator(0x08);
+
+    ESP_LOGI(TAG, "Zigbee attributes updated for target %d: X=%d mm, Y=%d mm, Speed=%d sm/s, Distance=%u mm",
+             data->target_id + 1, data->x, data->y, data->speed, data->distance);
+}
+
+static void zigbee_update_timer_callback(TimerHandle_t xTimer)
+{
+    radar_data_t data;
+
+    while (xQueueReceive(radar_data_queue, &data, 0) == pdTRUE) {
+        update_zigbee_attributes(&data);
+
+        break;
+    }
+}
+
+#define LD2450_FRAME_SIZE 30
+#define LD2450_HEADER_SIZE 4
+
+static const uint8_t RADAR_HEADER[4] = {0xAA, 0xFF, 0x03, 0x00};
+static const uint8_t RADAR_TAIL[2] = {0x55, 0xCC};
+
+static void ld2450_read_task(void *pvParameters) {
+    uint8_t rx_buffer[LD2450_FRAME_SIZE];
+
+    while (1) {
+        uint8_t byte;
+        while (uart_read_bytes(LD2450_UART_NUM, &byte, 1, pdMS_TO_TICKS(100)) == 1) {
+            if (byte == RADAR_HEADER[0]) {
+                rx_buffer[0] = byte;
+
+                if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[1], LD2450_HEADER_SIZE - 1, pdMS_TO_TICKS(50)) == LD2450_HEADER_SIZE - 1) {
+                    if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
+                        if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[LD2450_HEADER_SIZE],
+                            LD2450_FRAME_SIZE - LD2450_HEADER_SIZE, pdMS_TO_TICKS(100)) == LD2450_FRAME_SIZE - LD2450_HEADER_SIZE) {
+
+                            if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
+                                for (int target = 0; target < 3; target++) {
+                                    uint8_t *target_data = &rx_buffer[4 + target * 8];
+
+                                    bool has_data = false;
+                                    for (int i = 0; i < 8; i++) {
+                                        if (target_data[i] != 0) {
+                                            has_data = true;
+                                            break;
+                                        }
+                                    }
+
+                                    if (has_data) {
+                                        uint16_t raw_x = (target_data[1] << 8) | target_data[0];
+                                        uint16_t raw_y = (target_data[3] << 8) | target_data[2];
+
+                                        // invert sign
+                                        int16_t x;
+                                        if (raw_x & 0x8000) {
+                                            // highest bit 1 - positive
+                                            x = (int16_t)(raw_x & 0x7FFF);
+                                        } else {
+                                            // highest bit 0 - negative
+                                            x = (int16_t)(-(int)(raw_x & 0x7FFF));
+                                        }
+
+                                        int16_t y;
+                                        if (raw_y & 0x8000) {
+                                            y = (int16_t)(raw_y & 0x7FFF);
+                                        } else {
+                                            y = (int16_t)(-(int)(raw_y & 0x7FFF));
+                                        }
+
+                                        int16_t speed = (int16_t)((target_data[5] << 8) | target_data[4]);
+                                        // uint16_t distance = (uint16_t)(target_data[6] + target_data[7] * 256); always 0x68 0x01
+
+                                        uint16_t distance = (uint16_t)sqrt(x * x + y * y);
+
+                                        //esp_zb_lock_acquire(portMAX_DELAY);
+                                        /*
+                                        esp_zb_zcl_set_attribute_val(
+                                            HA_ESP_SENSOR_ENDPOINT,
+                                            CUSTOM_CLUSTER_ID,
+                                            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                            0x05,
+                                            &x,
+                                            false
+                                        );
+                                        esp_zb_zcl_set_attribute_val(
+                                            HA_ESP_SENSOR_ENDPOINT,
+                                            CUSTOM_CLUSTER_ID,
+                                            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                            0x06,
+                                            &y,
+                                            false
+                                        );
+                                        esp_zb_zcl_set_attribute_val(
+                                            HA_ESP_SENSOR_ENDPOINT,
+                                            CUSTOM_CLUSTER_ID,
+                                            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                            0x07,
+                                            &speed,
+                                            false
+                                        );
+
+                                        esp_zb_zcl_set_attribute_val(
+                                            HA_ESP_SENSOR_ENDPOINT,
+                                            CUSTOM_CLUSTER_ID,
+                                            ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+                                            0x08,
+                                            &distance,
+                                            false
+                                        );*/
+
+                                        //report_attribute_to_coordinator(0x05);
+                                        //report_attribute_to_coordinator(0x06);
+                                        //report_attribute_to_coordinator(0x07);
+                                        //report_attribute_to_coordinator(0x08);
+
+                                        // need batch?
+
+                                        //esp_zb_lock_release();
+
+                                        radar_data_t radar_data = {
+                                            .x = x,
+                                            .y = y,
+                                            .speed = speed,
+                                            .distance = distance,
+                                            .target_id = target
+                                        };
+
+                                        if (xQueueSend(radar_data_queue, &radar_data, 0) != pdTRUE) {
+                                            ESP_LOGW(TAG, "Radar data queue is full, dropping data");
+                                        }
+
+                                        update_led_color(distance);
+
+                                        ESP_LOGI(TAG, "Target %d: X=%d mm, Y=%d mm, Speed=%d sm/s, Calculated Distance=%u mm",
+                                                target + 1, x, y, speed, distance);
+                                    }
+                                }
+                                ESP_LOGI(TAG, "------------------------");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void start_radar_processing(void) {
+    radar_data_queue = xQueueCreate(1, sizeof(radar_data_t));
+    if (radar_data_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create radar data queue");
+        return;
+    }
+
+    zigbee_update_timer = xTimerCreate(
+        "ZigbeeUpdateTimer",
+        pdMS_TO_TICKS(1000),
+        pdTRUE,
+        NULL,
+        zigbee_update_timer_callback
+    );
+
+    if (zigbee_update_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create Zigbee update timer");
+        return;
+    }
+
+    xTimerStart(zigbee_update_timer, 0);
+
+    xTaskCreate(ld2450_read_task, "radar_task", 2048, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Radar data reading is started");
+}
+
+/*
+static void ld2450_read_task(void *pvParameters) {
+    uint8_t rx_buffer[LD2450_FRAME_SIZE];
+
+    while (1) {
+        uint8_t byte;
+        while (uart_read_bytes(LD2450_UART_NUM, &byte, 1, pdMS_TO_TICKS(100)) == 1) {
+            if (byte == RADAR_HEADER[0]) {
+                rx_buffer[0] = byte;
+
+                if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[1], LD2450_HEADER_SIZE - 1, pdMS_TO_TICKS(50)) == LD2450_HEADER_SIZE - 1) {
+                    if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
+                        if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[LD2450_HEADER_SIZE],
+                            LD2450_FRAME_SIZE - LD2450_HEADER_SIZE, pdMS_TO_TICKS(100)) == LD2450_FRAME_SIZE - LD2450_HEADER_SIZE) {
+
+                            if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
+                                ESP_LOGI(TAG, "Radar data frame:");
+                                for (int i = 0; i < LD2450_FRAME_SIZE; i++) {
+                                    printf("%02X ", rx_buffer[i]);
+                                }
+                                printf("\n");
+                            }
+                            }
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}*/
+
+/*void start_radar_processing(void) {
+    xTaskCreate(ld2450_read_task, "radar_task", 2048, NULL, 5, NULL);
+    ESP_LOGI(TAG, "Radar data reading is started");
+}*/
+
+// test read data - end
+
 static esp_err_t deferred_driver_init(void)
 {
     static bool is_inited = false;
@@ -370,13 +648,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
 signed int esp_zb_zcl_cluster_check_value_handler(uint16_t attr_id, uint8_t endpoint, uint8_t *value)
 {
-    ESP_LOGW(TAG, "check value endpoint:%d, attr: %d\n", endpoint, attr_id);
+    //ESP_LOGW(TAG, "check value endpoint:%d, attr: %d\n", endpoint, attr_id);
     return 0;
 }
 
 void esp_zb_zcl_cluster_write_attr_handler(uint8_t endpoint, uint16_t attr_id, uint8_t *new_value, uint16_t manuf_code)
 {
-    ESP_LOGW(TAG, "write attr endpoint:%d, attr: %d\n", endpoint, attr_id);
+    //ESP_LOGW(TAG, "write attr endpoint:%d, attr: %d\n", endpoint, attr_id);
 }
 
 #define CUSTOM_STRING_MAX_SIZE 255
@@ -411,6 +689,18 @@ static void esp_zb_task(void *pvParameters)
                                          ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
 
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    int16_t target_1_x = 0, target_1_y = 0, target_1_speed = 0, target_1_distance = 0;
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x05, ESP_ZB_ZCL_ATTR_TYPE_S16,
+                                             ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_x);
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x06, ESP_ZB_ZCL_ATTR_TYPE_S16,
+                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_y);
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x07, ESP_ZB_ZCL_ATTR_TYPE_S16,
+                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_speed);
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x08, ESP_ZB_ZCL_ATTR_TYPE_U16,
+                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_distance);
+
+
     //
 
     esp_zb_endpoint_config_t endpoint_config = {
@@ -462,5 +752,7 @@ void app_main(void) {
 
     vTaskDelay(pdMS_TO_TICKS(5000)); // wait until zigbee init
     ld2450_get_fw_version_and_update_zigbee();
+
+    start_radar_processing();
 }
 
