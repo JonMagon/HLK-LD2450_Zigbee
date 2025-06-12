@@ -148,6 +148,25 @@ static bool ld2450_read_firmware_version(char *version_str, size_t max_len)
     return success;
 }
 
+static void report_attribute_to_coordinator(uint16_t attr_id)
+{
+    esp_zb_zcl_report_attr_cmd_t report_attr_cmd = { 0 };
+    report_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    report_attr_cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000,
+    report_attr_cmd.attributeID = attr_id;
+    report_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+    report_attr_cmd.clusterID = CUSTOM_CLUSTER_ID;
+    report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
+
+    esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send report attribute command: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Report attribute command sent successfully");
+    }
+}
+
 static void ld2450_update_zigbee_fw_version_attr(const char *version_str)
 {
     if (version_str == NULL) {
@@ -176,6 +195,8 @@ static void ld2450_update_zigbee_fw_version_attr(const char *version_str)
         data,
         false
     );
+
+    report_attribute_to_coordinator(LD2450_VERSION_ATTR_ID);
 }
 
 static void ld2450_get_fw_version_and_update_zigbee(void)
@@ -387,7 +408,7 @@ static void esp_zb_task(void *pvParameters)
     char fw_version[32] = {0};
     fw_version[0] = 0;
     esp_zb_custom_cluster_add_custom_attr(custom_attr, LD2450_VERSION_ATTR_ID, ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING,
-                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY, fw_version);
+                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
 
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
     //
