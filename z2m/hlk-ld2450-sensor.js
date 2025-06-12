@@ -27,6 +27,9 @@ export default {
                 firmwareVersion: {ID: LD2450_VERSION_ATTR_ID, type: 0x42},
 
                 target_1_x: {ID: 0x0005, type: 0x29},
+                target_1_y: {ID: 0x0006, type: 0x29},
+                target_1_speed: {ID: 0x0007, type: 0x29},
+                target_1_distance: {ID: 0x0008, type: 0x21},
             },
             commands: {},
             commandsResponse: {},
@@ -56,9 +59,35 @@ export default {
             cluster: "customCluster",
             attribute: "target_1_x",
             description: "target_1_x",
-            valueMin: 0,
-            valueMax: 255,
             endpoint: "custom",
+            access: 'STATE',
+        }),
+
+        m.numeric({
+            name: "target_1_y",
+            cluster: "customCluster",
+            attribute: "target_1_y",
+            description: "target_1_y",
+            endpoint: "custom",
+            access: 'STATE',
+        }),
+
+        m.numeric({
+            name: "target_1_speed",
+            cluster: "customCluster",
+            attribute: "target_1_speed",
+            description: "target_1_speed",
+            endpoint: "custom",
+            access: 'STATE',
+        }),
+
+        m.numeric({
+            name: "target_1_distance",
+            cluster: "customCluster",
+            attribute: "target_1_distance",
+            description: "target_1_distance",
+            endpoint: "custom",
+            access: 'STATE',
         }),
     ],
 
