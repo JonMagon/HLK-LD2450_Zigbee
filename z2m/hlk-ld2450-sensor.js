@@ -114,4 +114,42 @@ export default {
             }
         ]);
     },
+
+    fromZigbee: [
+        {
+            cluster: 'customCluster',
+            type: 'write',
+            convert: (model, msg, publish, options, meta) => {
+                const result = {};
+
+                if (msg.data.hasOwnProperty('target_1_x')) {
+                    result.target_1_x = msg.data.target_1_x;
+                }
+                if (msg.data.hasOwnProperty('target_1_y')) {
+                    result.target_1_y = msg.data.target_1_y;
+                }
+
+                if (msg.data.hasOwnProperty('target_1_x') && msg.data.hasOwnProperty('target_1_y')) {
+                    result.target_1_distance = Math.round(
+                        Math.sqrt(Math.pow(msg.data.target_1_y, 2) + Math.pow(msg.data.target_1_y, 2))
+                    )
+                }
+
+                if (msg.data.hasOwnProperty('target_1_speed')) {
+                    result.target_1_speed = msg.data.target_1_speed;
+                }
+                if (msg.data.hasOwnProperty('target_1_distance')) {
+                    result.target_1_distance = msg.data.target_1_distance;
+                }
+                if (msg.data.hasOwnProperty('customByte')) {
+                    result.custom_byte = msg.data.customByte;
+                }
+                if (msg.data.hasOwnProperty('firmwareVersion')) {
+                    result.LD2450_firmware_version = msg.data.firmwareVersion;
+                }
+
+                return result;
+            },
+        },
+    ],
 };

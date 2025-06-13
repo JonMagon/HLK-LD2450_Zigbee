@@ -158,7 +158,9 @@ static void report_attribute_to_coordinator(uint16_t attr_id)
     report_attr_cmd.clusterID = CUSTOM_CLUSTER_ID;
     report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
 
+    esp_zb_lock_acquire(portMAX_DELAY);
     esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+    esp_zb_lock_release();
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send report attribute command: %s", esp_err_to_name(ret));
@@ -242,8 +244,40 @@ static TimerHandle_t zigbee_update_timer = NULL;
 static radar_data_t latest_radar_data;
 static SemaphoreHandle_t radar_data_mutex;
 
+static void report_attributes_to_coordinator()
+{
+
+    esp_zb_zcl_attribute_t attr_field[] =
+{
+        {0x05, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.x}},
+        {0x06, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.y}},
+     };
+
+    esp_zb_zcl_write_attr_cmd_t write_attr_cmd = { 0 };
+    write_attr_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
+    write_attr_cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000;
+    write_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
+    write_attr_cmd.clusterID = CUSTOM_CLUSTER_ID;
+    write_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
+    //write_attr_cmd.zcl_basic_cmd.dst_endpoint = HA_ESP_SENSOR_ENDPOINT;
+
+    write_attr_cmd.attr_number = 2;
+    write_attr_cmd.attr_field = attr_field;
+
+    esp_zb_lock_acquire(portMAX_DELAY);
+    const esp_err_t ret = esp_zb_zcl_write_attr_cmd_req(&write_attr_cmd);
+    esp_zb_lock_release();
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send report attribute command: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Report attribute command sent successfully");
+    }
+}
+
 static void update_zigbee_attributes(const radar_data_t *data)
 {
+    /*
     esp_zb_zcl_set_attribute_val(
         HA_ESP_SENSOR_ENDPOINT,
         CUSTOM_CLUSTER_ID,
@@ -262,7 +296,9 @@ static void update_zigbee_attributes(const radar_data_t *data)
     );
 
     report_attribute_to_coordinator(0x05);
-    report_attribute_to_coordinator(0x06);
+    report_attribute_to_coordinator(0x06);*/
+
+    report_attributes_to_coordinator();
 
     ESP_LOGI(TAG, "Zigbee attributes updated for target %d: X=%d mm, Y=%d mm",
              data->target_id + 1, data->x, data->y);
@@ -353,12 +389,12 @@ static void ld2450_read_task(void *pvParameters) {
     }
 }
 
-#define UPODATE_FREQ 1
+#define THROTTLE_MS 1000
 
 void start_radar_processing(void) {
     zigbee_update_timer = xTimerCreate(
         "ZigbeeUpdateTimer",
-        pdMS_TO_TICKS(1000 / UPODATE_FREQ),
+        pdMS_TO_TICKS(THROTTLE_MS),
         pdTRUE,
         NULL,
         zigbee_update_timer_callback
