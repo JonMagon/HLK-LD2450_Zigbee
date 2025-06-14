@@ -293,74 +293,57 @@ static void ld2450_read_task(void *pvParameters) {
     uint8_t rx_buffer[LD2450_FRAME_SIZE];
 
     while (1) {
-        uint8_t byte;
-        while (uart_read_bytes(LD2450_UART_NUM, &byte, 1, pdMS_TO_TICKS(100)) == 1) {
-            if (byte == RADAR_HEADER[0]) {
-                rx_buffer[0] = byte;
+        const int bytes_read = uart_read_bytes(LD2450_UART_NUM, rx_buffer, LD2450_FRAME_SIZE, pdMS_TO_TICKS(500));
 
-                if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[1], LD2450_HEADER_SIZE - 1, pdMS_TO_TICKS(50)) == LD2450_HEADER_SIZE - 1) {
-                    if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
-                        if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[LD2450_HEADER_SIZE],
-                            LD2450_FRAME_SIZE - LD2450_HEADER_SIZE, pdMS_TO_TICKS(100)) == LD2450_FRAME_SIZE - LD2450_HEADER_SIZE) {
+        if (bytes_read == LD2450_FRAME_SIZE) {
+            if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
+                if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
+                    if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                        for (int target = 0; target < 3; target++) {
+                            uint8_t *target_data = &rx_buffer[4 + target * 8];
 
-                            if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
-                                if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                                    for (int target = 0; target < 3; target++) {
-                                        uint8_t *target_data = &rx_buffer[4 + target * 8];
-
-                                        bool has_data = false;
-                                        for (int i = 0; i < 8; i++) {
-                                            if (target_data[i] != 0) {
-                                                has_data = true;
-                                                break;
-                                            }
-                                        }
-
-                                        if (has_data) {
-                                            uint16_t raw_x = (target_data[1] << 8) | target_data[0];
-                                            uint16_t raw_y = (target_data[3] << 8) | target_data[2];
-                                            uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
-
-                                            int16_t x;
-                                            if (raw_x & 0x8000) {
-                                                x = (int16_t)(raw_x & 0x7FFF);
-                                            } else {
-                                                x = (int16_t)(-(int)(raw_x & 0x7FFF));
-                                            }
-
-                                            int16_t y;
-                                            if (raw_y & 0x8000) {
-                                                y = (int16_t)(raw_y & 0x7FFF);
-                                            } else {
-                                                y = (int16_t)(-(int)(raw_y & 0x7FFF));
-                                            }
-
-                                            int16_t speed;
-                                            if (raw_speed & 0x8000) {
-                                                speed = (int16_t)(raw_speed & 0x7FFF);
-                                            } else {
-                                                speed = (int16_t)(-(int)(raw_speed & 0x7FFF));
-                                            }
-
-                                            latest_radar_data.x[target] = x;
-                                            latest_radar_data.y[target] = y;
-                                            latest_radar_data.speed[target] = speed;
-                                        } else {
-                                            latest_radar_data.x[target] = INVALID_COORDINATE_VALUE;
-                                            latest_radar_data.y[target] = INVALID_COORDINATE_VALUE;
-                                            latest_radar_data.speed[target] = INVALID_COORDINATE_VALUE;
-                                        }
-                                    }
-
-                                    xSemaphoreGive(radar_data_mutex);
+                            bool has_data = false;
+                            for (int i = 0; i < 8; i++) {
+                                if (target_data[i] != 0) {
+                                    has_data = true;
+                                    break;
                                 }
-                                ESP_LOGI(TAG, "------------------------");
+                            }
+
+                            if (has_data) {
+                                uint16_t raw_x = (target_data[1] << 8) | target_data[0];
+                                uint16_t raw_y = (target_data[3] << 8) | target_data[2];
+                                uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
+
+                                #define CONVERT_SIGNED(raw_val) \
+                                    ((raw_val & 0x8000) ? (int16_t)(raw_val & 0x7FFF) : -(int16_t)(raw_val & 0x7FFF))
+
+                                latest_radar_data.x[target] = CONVERT_SIGNED(raw_x);
+                                latest_radar_data.y[target] = CONVERT_SIGNED(raw_y);
+                                latest_radar_data.speed[target] = CONVERT_SIGNED(raw_speed);
+
+                                #undef CONVERT_SIGNED
+                            } else {
+                                latest_radar_data.x[target] = INVALID_COORDINATE_VALUE;
+                                latest_radar_data.y[target] = INVALID_COORDINATE_VALUE;
+                                latest_radar_data.speed[target] = INVALID_COORDINATE_VALUE;
                             }
                         }
+
+                        xSemaphoreGive(radar_data_mutex);
+                        ESP_LOGI(TAG, "Radar frame processed successfully");
                     }
+                } else {
+                    ESP_LOGW(TAG, "Invalid frame tail");
                 }
+            } else {
+                ESP_LOGW(TAG, "Invalid frame header");
             }
+        } else if (bytes_read > 0) {
+            uart_flush_input(LD2450_UART_NUM);
+            ESP_LOGW(TAG, "Incomplete frame received (%d bytes), flushing buffer", bytes_read);
         }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -386,42 +369,6 @@ void start_radar_processing(void) {
     xTaskCreate(ld2450_read_task, "radar_task", 2048, NULL, 5, NULL);
     ESP_LOGI(TAG, "Radar data reading is started");
 }
-
-/*
-static void ld2450_read_task(void *pvParameters) {
-    uint8_t rx_buffer[LD2450_FRAME_SIZE];
-
-    while (1) {
-        uint8_t byte;
-        while (uart_read_bytes(LD2450_UART_NUM, &byte, 1, pdMS_TO_TICKS(100)) == 1) {
-            if (byte == RADAR_HEADER[0]) {
-                rx_buffer[0] = byte;
-
-                if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[1], LD2450_HEADER_SIZE - 1, pdMS_TO_TICKS(50)) == LD2450_HEADER_SIZE - 1) {
-                    if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
-                        if (uart_read_bytes(LD2450_UART_NUM, &rx_buffer[LD2450_HEADER_SIZE],
-                            LD2450_FRAME_SIZE - LD2450_HEADER_SIZE, pdMS_TO_TICKS(100)) == LD2450_FRAME_SIZE - LD2450_HEADER_SIZE) {
-
-                            if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
-                                ESP_LOGI(TAG, "Radar data frame:");
-                                for (int i = 0; i < LD2450_FRAME_SIZE; i++) {
-                                    printf("%02X ", rx_buffer[i]);
-                                }
-                                printf("\n");
-                            }
-                            }
-                    }
-                }
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}*/
-
-/*void start_radar_processing(void) {
-    xTaskCreate(ld2450_read_task, "radar_task", 2048, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Radar data reading is started");
-}*/
 
 // test read data - end
 
