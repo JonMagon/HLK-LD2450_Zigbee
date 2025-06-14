@@ -13,12 +13,12 @@ export default {
     model: 'CUSTOM_DEVICE',
     vendor: 'JonMagon',
     description: 'Test device',
-    
+
     endpoint: (device) => {
         return {custom: ENDPOINT};
     },
 
-    
+
     extend: [
         m.deviceAddCustomCluster("customCluster", {
             ID: 0xFC00,
@@ -28,13 +28,12 @@ export default {
 
                 target_1_x: {ID: 0x0005, type: 0x29},
                 target_1_y: {ID: 0x0006, type: 0x29},
-                target_1_speed: {ID: 0x0007, type: 0x29},
-                target_1_distance: {ID: 0x0008, type: 0x21},
+                target_1_speed: {ID: 0x0007, type: 0x29}
             },
             commands: {},
             commandsResponse: {},
         }),
-        
+
         m.numeric({
             name: "custom_byte",
             cluster: "customCluster",
@@ -51,44 +50,17 @@ export default {
             attribute: "firmwareVersion",
             description: "LD2450 Radar Firmware Version",
             endpoint: "custom",
-            //access: 'STATE',
         }),
+    ],
 
-        m.numeric({
-            name: "target_1_x",
-            cluster: "customCluster",
-            attribute: "target_1_x",
-            description: "target_1_x",
-            endpoint: "custom",
-            access: 'STATE',
-        }),
-
-        m.numeric({
-            name: "target_1_y",
-            cluster: "customCluster",
-            attribute: "target_1_y",
-            description: "target_1_y",
-            endpoint: "custom",
-            access: 'STATE',
-        }),
-
-        m.numeric({
-            name: "target_1_speed",
-            cluster: "customCluster",
-            attribute: "target_1_speed",
-            description: "target_1_speed",
-            endpoint: "custom",
-            access: 'STATE',
-        }),
-
-        m.numeric({
-            name: "target_1_distance",
-            cluster: "customCluster",
-            attribute: "target_1_distance",
-            description: "target_1_distance",
-            endpoint: "custom",
-            access: 'STATE',
-        }),
+    exposes: [
+        exposes.composite('target_1', 'target_1', exposes.access.STATE)
+            .withDescription('Target 1 tracking data')
+            .withFeature(exposes.numeric('x', exposes.access.STATE).withUnit('mm').withDescription('X coordinate'))
+            .withFeature(exposes.numeric('y', exposes.access.STATE).withUnit('mm').withDescription('Y coordinate'))
+            .withFeature(exposes.numeric('speed', exposes.access.STATE).withUnit('mm/s').withDescription('Speed'))
+            .withFeature(exposes.numeric('distance', exposes.access.STATE).withUnit('mm').withDescription('Distance'))
+            .withFeature(exposes.numeric('angle', exposes.access.STATE).withUnit('°').withDescription('Angle'))
     ],
 
     configure: async (device, coordinatorEndpoint) => {
@@ -96,7 +68,7 @@ export default {
         if (!endpoint) {
             throw new Error('Endpoint does not exist.');
         }
-        
+
         await reporting.bind(endpoint, coordinatorEndpoint, ["customCluster"]);
 
         await endpoint.configureReporting("customCluster", [
@@ -122,25 +94,30 @@ export default {
             convert: (model, msg, publish, options, meta) => {
                 const result = {};
 
+                const target1Data = {};
+
                 if (msg.data.hasOwnProperty('target_1_x')) {
-                    result.target_1_x = msg.data.target_1_x;
+                    target1Data.x = msg.data.target_1_x;
                 }
                 if (msg.data.hasOwnProperty('target_1_y')) {
-                    result.target_1_y = msg.data.target_1_y;
+                    target1Data.y = msg.data.target_1_y;
+                }
+                if (msg.data.hasOwnProperty('target_1_speed')) {
+                    target1Data.speed = msg.data.target_1_speed;
                 }
 
                 if (msg.data.hasOwnProperty('target_1_x') && msg.data.hasOwnProperty('target_1_y')) {
-                    result.target_1_distance = Math.round(
-                        Math.sqrt(Math.pow(msg.data.target_1_y, 2) + Math.pow(msg.data.target_1_y, 2))
-                    )
+                    target1Data.distance = Math.round(
+                        Math.sqrt(Math.pow(msg.data.target_1_x, 2) + Math.pow(msg.data.target_1_y, 2))
+                    );
+
+                    const angleDeg = Math.atan2(msg.data.target_1_x, msg.data.target_1_y) * (180 / Math.PI);
+                    target1Data.angle = Math.round(angleDeg * 10) / 10;
                 }
 
-                if (msg.data.hasOwnProperty('target_1_speed')) {
-                    result.target_1_speed = msg.data.target_1_speed;
-                }
-                if (msg.data.hasOwnProperty('target_1_distance')) {
-                    result.target_1_distance = msg.data.target_1_distance;
-                }
+                result.target_1 = target1Data;
+
+
                 if (msg.data.hasOwnProperty('customByte')) {
                     result.custom_byte = msg.data.customByte;
                 }

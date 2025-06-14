@@ -233,6 +233,7 @@ static void update_led_color(uint16_t distance)
 typedef struct {
     int16_t x;
     int16_t y;
+    int16_t speed;
     uint8_t target_id;
 } radar_data_t;
 
@@ -251,6 +252,7 @@ static void report_attributes_to_coordinator()
 {
         {0x05, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.x}},
         {0x06, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.y}},
+        {0x07, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.speed}},
      };
 
     esp_zb_zcl_write_attr_cmd_t write_attr_cmd = { 0 };
@@ -259,9 +261,8 @@ static void report_attributes_to_coordinator()
     write_attr_cmd.direction = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI;
     write_attr_cmd.clusterID = CUSTOM_CLUSTER_ID;
     write_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
-    //write_attr_cmd.zcl_basic_cmd.dst_endpoint = HA_ESP_SENSOR_ENDPOINT;
 
-    write_attr_cmd.attr_number = 2;
+    write_attr_cmd.attr_number = 3;
     write_attr_cmd.attr_field = attr_field;
 
     esp_zb_lock_acquire(portMAX_DELAY);
@@ -348,6 +349,7 @@ static void ld2450_read_task(void *pvParameters) {
                                         if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                                             uint16_t raw_x = (target_data[1] << 8) | target_data[0];
                                             uint16_t raw_y = (target_data[3] << 8) | target_data[2];
+                                            uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
 
                                             // invert sign
                                             int16_t x;
@@ -366,12 +368,18 @@ static void ld2450_read_task(void *pvParameters) {
                                                 y = (int16_t)(-(int)(raw_y & 0x7FFF));
                                             }
 
-                                            int16_t speed = (int16_t)((target_data[5] << 8) | target_data[4]);
-                                            // uint16_t distance = (uint16_t)(target_data[6] + target_data[7] * 256); always 0x68 0x01
+                                            int16_t speed;
+                                            if (raw_speed & 0x8000) {
+                                                speed = (int16_t)(raw_speed & 0x7FFF);
+                                            } else {
+                                                speed = (int16_t)(-(int)(raw_speed & 0x7FFF));
+                                            }
 
+                                            // uint16_t distance = (uint16_t)(target_data[6] + target_data[7] * 256); always 0x68 0x01
 
                                             latest_radar_data.x = x;
                                             latest_radar_data.y = y;
+                                            latest_radar_data.speed = speed;
                                             latest_radar_data.target_id = target;
 
                                             xSemaphoreGive(radar_data_mutex);
@@ -647,17 +655,6 @@ static void esp_zb_task(void *pvParameters)
                                          ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
 
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    int16_t target_1_x = 0, target_1_y = 0, target_1_speed = 0, target_1_distance = 0;
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x05, ESP_ZB_ZCL_ATTR_TYPE_S16,
-                                             ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_x);
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x06, ESP_ZB_ZCL_ATTR_TYPE_S16,
-                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_y);
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x07, ESP_ZB_ZCL_ATTR_TYPE_S16,
-                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_speed);
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x08, ESP_ZB_ZCL_ATTR_TYPE_U16,
-                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &target_1_distance);
-
 
     //
 
