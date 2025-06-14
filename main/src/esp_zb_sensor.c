@@ -61,9 +61,10 @@ static bool ld2450_enter_config_mode(void)
     int len;
 
     ESP_LOGI(TAG, "Entering LD2450 configuration mode...");
-    uart_flush_input(LD2450_UART_NUM);
 
     uart_write_bytes(LD2450_UART_NUM, (const char*)enable_cmd, sizeof(enable_cmd));
+    uart_flush_input(LD2450_UART_NUM);
+
     vTaskDelay(pdMS_TO_TICKS(100));
 
     len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
@@ -266,14 +267,8 @@ static void report_attributes_to_coordinator()
     write_attr_cmd.attr_field = attr_field;
 
     esp_zb_lock_acquire(portMAX_DELAY);
-    const esp_err_t ret = esp_zb_zcl_write_attr_cmd_req(&write_attr_cmd);
+    esp_zb_zcl_write_attr_cmd_req(&write_attr_cmd);
     esp_zb_lock_release();
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send report attribute command: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "Report attribute command sent successfully");
-    }
 }
 
 static void update_zigbee_attributes(const radar_data_t *data)
@@ -548,9 +543,6 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
                     uint8_t color_value = *(uint8_t *)(message->attribute.data.value);
                     light_driver_set_color_RGB(color_value, 255, 0);
                     light_driver_set_power(true);
-
-                    //ld2450_uart_init(); // test firmware
-                    //ld2450_read_firmware_version(); // test firmware
                 }
                 else {
                     ESP_LOGW(TAG, "Invalid attribute id");
