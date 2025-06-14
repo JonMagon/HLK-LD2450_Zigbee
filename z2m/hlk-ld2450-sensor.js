@@ -7,6 +7,10 @@ const CUSTOM_ATTRIBUTE_ID = 0x0001;
 const ENDPOINT = 10;
 
 const LD2450_VERSION_ATTR_ID = 0x04;
+const INVALID_COORDINATE_VALUE = 0x7FFF;
+
+const TARGET_BASE_ATTR_ID = 0x0005;
+const TARGETS_COUNT = 3;
 
 export default {
     zigbeeModel: ['esp32h2'],
@@ -18,7 +22,6 @@ export default {
         return {custom: ENDPOINT};
     },
 
-
     extend: [
         m.deviceAddCustomCluster("customCluster", {
             ID: 0xFC00,
@@ -26,9 +29,16 @@ export default {
                 customByte: {ID: 0x0001, type: 0x20},
                 firmwareVersion: {ID: LD2450_VERSION_ATTR_ID, type: 0x42},
 
-                target_1_x: {ID: 0x0005, type: 0x29},
-                target_1_y: {ID: 0x0006, type: 0x29},
-                target_1_speed: {ID: 0x0007, type: 0x29}
+                ...((() => {
+                    const attrs = {};
+                    for (let i = 1; i <= TARGETS_COUNT; i++) {
+                        const baseId = TARGET_BASE_ATTR_ID + (i - 1) * 3;
+                        attrs[`target_${i}_x`] = {ID: baseId, type: 0x29};
+                        attrs[`target_${i}_y`] = {ID: baseId + 1, type: 0x29};
+                        attrs[`target_${i}_speed`] = {ID: baseId + 2, type: 0x29};
+                    }
+                    return attrs;
+                })())
             },
             commands: {},
             commandsResponse: {},
@@ -54,13 +64,24 @@ export default {
     ],
 
     exposes: [
-        exposes.composite('target_1', 'target_1', exposes.access.STATE)
-            .withDescription('Target 1 tracking data')
-            .withFeature(exposes.numeric('x', exposes.access.STATE).withUnit('mm').withDescription('X coordinate'))
-            .withFeature(exposes.numeric('y', exposes.access.STATE).withUnit('mm').withDescription('Y coordinate'))
-            .withFeature(exposes.numeric('speed', exposes.access.STATE).withUnit('mm/s').withDescription('Speed'))
-            .withFeature(exposes.numeric('distance', exposes.access.STATE).withUnit('mm').withDescription('Distance'))
-            .withFeature(exposes.numeric('angle', exposes.access.STATE).withUnit('°').withDescription('Angle'))
+        (() => {
+            let trackingComposite = exposes.composite('tracking', 'tracking', exposes.access.STATE)
+                .withDescription('Radar tracking system');
+
+            for (let i = 1; i <= TARGETS_COUNT; i++) {
+                trackingComposite = trackingComposite.withFeature(
+                    exposes.composite(`target_${i}`, `target_${i}`, exposes.access.STATE)
+                        .withDescription(`Target ${i} tracking data`)
+                        .withFeature(exposes.numeric('x', exposes.access.STATE).withUnit('mm').withDescription('X coordinate'))
+                        .withFeature(exposes.numeric('y', exposes.access.STATE).withUnit('mm').withDescription('Y coordinate'))
+                        .withFeature(exposes.numeric('speed', exposes.access.STATE).withUnit('mm/s').withDescription('Speed'))
+                        .withFeature(exposes.numeric('distance', exposes.access.STATE).withUnit('mm').withDescription('Distance'))
+                        .withFeature(exposes.numeric('angle', exposes.access.STATE).withUnit('°').withDescription('Angle'))
+                );
+            }
+
+            return trackingComposite;
+        })()
     ],
 
     configure: async (device, coordinatorEndpoint) => {
@@ -94,29 +115,51 @@ export default {
             convert: (model, msg, publish, options, meta) => {
                 const result = {};
 
-                const target1Data = {};
+                const processTargetData = (targetNum) => {
+                    const targetData = {};
+                    const xKey = `target_${targetNum}_x`;
+                    const yKey = `target_${targetNum}_y`;
+                    const speedKey = `target_${targetNum}_speed`;
 
-                if (msg.data.hasOwnProperty('target_1_x')) {
-                    target1Data.x = msg.data.target_1_x;
+                    if (msg.data.hasOwnProperty(xKey)) {
+                        targetData.x = msg.data[xKey] === INVALID_COORDINATE_VALUE ? undefined : msg.data[xKey];
+                    }
+                    if (msg.data.hasOwnProperty(yKey)) {
+                        targetData.y = msg.data[yKey] === INVALID_COORDINATE_VALUE ? undefined : msg.data[yKey];
+                    }
+                    if (msg.data.hasOwnProperty(speedKey)) {
+                        targetData.speed = msg.data[speedKey] === INVALID_COORDINATE_VALUE ? undefined : msg.data[speedKey];
+                    }
+
+                    if (msg.data.hasOwnProperty(xKey) && msg.data.hasOwnProperty(yKey)) {
+                        if (msg.data[xKey] === INVALID_COORDINATE_VALUE || msg.data[yKey] === INVALID_COORDINATE_VALUE) {
+                            targetData.distance = undefined;
+                            targetData.angle = undefined;
+                        } else {
+                            targetData.distance = Math.round(
+                                Math.sqrt(Math.pow(msg.data[xKey], 2) + Math.pow(msg.data[yKey], 2))
+                            );
+
+                            const angleDeg = Math.atan2(msg.data[xKey], msg.data[yKey]) * (180 / Math.PI);
+                            targetData.angle = Math.round(angleDeg * 10) / 10;
+                        }
+                    }
+
+                    return targetData;
+                };
+
+                const trackingData = {};
+
+                for (let i = 1; i <= TARGETS_COUNT; i++) {
+                    const targetData = processTargetData(i);
+                    if (Object.keys(targetData).length > 0) {
+                        trackingData[`target_${i}`] = targetData;
+                    }
                 }
-                if (msg.data.hasOwnProperty('target_1_y')) {
-                    target1Data.y = msg.data.target_1_y;
+
+                if (Object.keys(trackingData).length > 0) {
+                    result.tracking = trackingData;
                 }
-                if (msg.data.hasOwnProperty('target_1_speed')) {
-                    target1Data.speed = msg.data.target_1_speed;
-                }
-
-                if (msg.data.hasOwnProperty('target_1_x') && msg.data.hasOwnProperty('target_1_y')) {
-                    target1Data.distance = Math.round(
-                        Math.sqrt(Math.pow(msg.data.target_1_x, 2) + Math.pow(msg.data.target_1_y, 2))
-                    );
-
-                    const angleDeg = Math.atan2(msg.data.target_1_x, msg.data.target_1_y) * (180 / Math.PI);
-                    target1Data.angle = Math.round(angleDeg * 10) / 10;
-                }
-
-                result.target_1 = target1Data;
-
 
                 if (msg.data.hasOwnProperty('customByte')) {
                     result.custom_byte = msg.data.customByte;

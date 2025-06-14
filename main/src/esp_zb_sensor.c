@@ -218,42 +218,46 @@ static void ld2450_get_fw_version_and_update_zigbee(void)
 
 // test read data - start
 
-static void update_led_color(uint16_t distance)
-{
-    const double MAX_DISTANCE = 4000.0f; // 4m
 
-    double normalized_distance = distance / MAX_DISTANCE;
-    if (normalized_distance > 1.0f) normalized_distance = 1.0f;
-
-    uint8_t green = (uint8_t)(255 * normalized_distance);
-    uint8_t red = (uint8_t)(255 * (1.0f - normalized_distance));
-
-    light_driver_set_color_RGB(red, green, 0);
-}
+#define INVALID_COORDINATE_VALUE 0x7FFF
 
 typedef struct {
-    int16_t x;
-    int16_t y;
-    int16_t speed;
-    uint8_t target_id;
+    int16_t x[3];
+    int16_t y[3];
+    int16_t speed[3];
 } radar_data_t;
 
-static QueueHandle_t radar_data_queue = NULL;
+static radar_data_t latest_radar_data = {
+    .x = {INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE},
+    .y = {INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE},
+    .speed = {INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE, INVALID_COORDINATE_VALUE}
+};
+
+#define TARGET_BASE_ATTR_ID 0x05
+
+#define TARGETS_COUNT 3
+#define ATTRS_PER_TARGET 3
+
+#define GENERATE_ATTR(target_idx, field, offset) \
+    {TARGET_BASE_ATTR_ID + (target_idx) * ATTRS_PER_TARGET + offset, \
+    {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.field[target_idx]}}
+
+#define TARGET_ATTRS(GEN_MACRO, target_idx) \
+    GEN_MACRO(target_idx, x, 0), \
+    GEN_MACRO(target_idx, y, 1), \
+    GEN_MACRO(target_idx, speed, 2)
 
 static TimerHandle_t zigbee_update_timer = NULL;
 
-
-static radar_data_t latest_radar_data;
 static SemaphoreHandle_t radar_data_mutex;
 
 static void report_attributes_to_coordinator()
 {
-
     esp_zb_zcl_attribute_t attr_field[] =
-{
-        {0x05, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.x}},
-        {0x06, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.y}},
-        {0x07, {ESP_ZB_ZCL_ATTR_TYPE_S16, sizeof(int16_t), &latest_radar_data.speed}},
+    {
+        TARGET_ATTRS(GENERATE_ATTR, 0),
+        TARGET_ATTRS(GENERATE_ATTR, 1),
+        TARGET_ATTRS(GENERATE_ATTR, 2)
      };
 
     esp_zb_zcl_write_attr_cmd_t write_attr_cmd = { 0 };
@@ -263,7 +267,7 @@ static void report_attributes_to_coordinator()
     write_attr_cmd.clusterID = CUSTOM_CLUSTER_ID;
     write_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
 
-    write_attr_cmd.attr_number = 3;
+    write_attr_cmd.attr_number = TARGETS_COUNT * ATTRS_PER_TARGET;
     write_attr_cmd.attr_field = attr_field;
 
     esp_zb_lock_acquire(portMAX_DELAY);
@@ -271,39 +275,10 @@ static void report_attributes_to_coordinator()
     esp_zb_lock_release();
 }
 
-static void update_zigbee_attributes(const radar_data_t *data)
-{
-    /*
-    esp_zb_zcl_set_attribute_val(
-        HA_ESP_SENSOR_ENDPOINT,
-        CUSTOM_CLUSTER_ID,
-        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-        0x05,
-        &data->x,
-        false
-    );
-    esp_zb_zcl_set_attribute_val(
-        HA_ESP_SENSOR_ENDPOINT,
-        CUSTOM_CLUSTER_ID,
-        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-        0x06,
-        &data->y,
-        false
-    );
-
-    report_attribute_to_coordinator(0x05);
-    report_attribute_to_coordinator(0x06);*/
-
-    report_attributes_to_coordinator();
-
-    ESP_LOGI(TAG, "Zigbee attributes updated for target %d: X=%d mm, Y=%d mm",
-             data->target_id + 1, data->x, data->y);
-}
-
 static void zigbee_update_timer_callback(TimerHandle_t xTimer)
 {
     if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        update_zigbee_attributes(&latest_radar_data);
+        report_attributes_to_coordinator();
         xSemaphoreGive(radar_data_mutex);
     }
 }
@@ -329,30 +304,27 @@ static void ld2450_read_task(void *pvParameters) {
                             LD2450_FRAME_SIZE - LD2450_HEADER_SIZE, pdMS_TO_TICKS(100)) == LD2450_FRAME_SIZE - LD2450_HEADER_SIZE) {
 
                             if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
-                                for (int target = 0; target < 3; target++) {
-                                    uint8_t *target_data = &rx_buffer[4 + target * 8];
+                                if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                                    for (int target = 0; target < 3; target++) {
+                                        uint8_t *target_data = &rx_buffer[4 + target * 8];
 
-                                    bool has_data = false;
-                                    for (int i = 0; i < 8; i++) {
-                                        if (target_data[i] != 0) {
-                                            has_data = true;
-                                            break;
+                                        bool has_data = false;
+                                        for (int i = 0; i < 8; i++) {
+                                            if (target_data[i] != 0) {
+                                                has_data = true;
+                                                break;
+                                            }
                                         }
-                                    }
 
-                                    if (has_data) {
-                                        if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                                        if (has_data) {
                                             uint16_t raw_x = (target_data[1] << 8) | target_data[0];
                                             uint16_t raw_y = (target_data[3] << 8) | target_data[2];
                                             uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
 
-                                            // invert sign
                                             int16_t x;
                                             if (raw_x & 0x8000) {
-                                                // highest bit 1 - positive
                                                 x = (int16_t)(raw_x & 0x7FFF);
                                             } else {
-                                                // highest bit 0 - negative
                                                 x = (int16_t)(-(int)(raw_x & 0x7FFF));
                                             }
 
@@ -370,16 +342,17 @@ static void ld2450_read_task(void *pvParameters) {
                                                 speed = (int16_t)(-(int)(raw_speed & 0x7FFF));
                                             }
 
-                                            // uint16_t distance = (uint16_t)(target_data[6] + target_data[7] * 256); always 0x68 0x01
-
-                                            latest_radar_data.x = x;
-                                            latest_radar_data.y = y;
-                                            latest_radar_data.speed = speed;
-                                            latest_radar_data.target_id = target;
-
-                                            xSemaphoreGive(radar_data_mutex);
+                                            latest_radar_data.x[target] = x;
+                                            latest_radar_data.y[target] = y;
+                                            latest_radar_data.speed[target] = speed;
+                                        } else {
+                                            latest_radar_data.x[target] = INVALID_COORDINATE_VALUE;
+                                            latest_radar_data.y[target] = INVALID_COORDINATE_VALUE;
+                                            latest_radar_data.speed[target] = INVALID_COORDINATE_VALUE;
                                         }
                                     }
+
+                                    xSemaphoreGive(radar_data_mutex);
                                 }
                                 ESP_LOGI(TAG, "------------------------");
                             }
@@ -647,6 +620,7 @@ static void esp_zb_task(void *pvParameters)
                                          ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
 
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
 
     //
 
