@@ -54,64 +54,122 @@ static void ld2450_uart_init(void)
     ESP_LOGI(TAG, "LD2450 UART initialized");
 }
 
+static bool validate_response_basic(const uint8_t *response, const int len, const int expected_len,
+                                    const uint8_t *expected_header, const uint8_t *expected_tail)
+{
+    if (len != expected_len) {
+        ESP_LOGW(TAG, "Invalid response length: %d bytes (expected %d)", len, expected_len);
+        return false;
+    }
+
+    if (memcmp(response, expected_header, 4) != 0) {
+        ESP_LOGW(TAG, "Invalid response header");
+        return false;
+    }
+
+    if (memcmp(&response[len - 4], expected_tail, 4) != 0) {
+        ESP_LOGW(TAG, "Invalid response tail");
+        return false;
+    }
+
+    return true;
+}
+
+static bool validate_response_data(const uint8_t *response, const uint16_t expected_length,
+                                  const uint8_t expected_cmd_low, const uint8_t expected_cmd_high)
+{
+    uint16_t data_length = response[4] | (response[5] << 8);
+    if (data_length != expected_length) {
+        ESP_LOGW(TAG, "Invalid data length: 0x%04x (expected 0x%04x)", data_length, expected_length);
+        return false;
+    }
+
+    if (response[6] != expected_cmd_low || response[7] != expected_cmd_high) {
+        ESP_LOGW(TAG, "Invalid command word: 0x%02X%02X (expected %02X%02X)",
+                 response[7], response[6], expected_cmd_high, expected_cmd_low);
+        return false;
+    }
+
+    uint16_t ack_status = response[8] | (response[9] << 8);
+    if (ack_status != 0x0000) {
+        ESP_LOGW(TAG, "Request failed, ACK status: 0x%04x", ack_status);
+        return false;
+    }
+
+    return true;
+}
+
+static void log_received_data(const uint8_t *response, int len)
+{
+    if (len > 0) {
+        ESP_LOGD(TAG, "Received data: ");
+        for (int i = 0; i < len; i++) {
+            printf("%02x ", response[i]);
+        }
+        printf("\n");
+    }
+}
+
 static bool ld2450_enter_config_mode(void)
 {
-    uint8_t enable_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xFF, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
-    uint8_t response[64];
-    int len;
+    const uint8_t enable_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xFF, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
+    const uint8_t expected_header[] = {0xFD, 0xFC, 0xFB, 0xFA};
+    const uint8_t expected_tail[] = {0x04, 0x03, 0x02, 0x01};
+    uint8_t response[18];
 
     ESP_LOGI(TAG, "Entering LD2450 configuration mode...");
 
     uart_write_bytes(LD2450_UART_NUM, (const char*)enable_cmd, sizeof(enable_cmd));
     uart_flush_input(LD2450_UART_NUM);
-
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
-    if (len > 0) {
-        ESP_LOGI(TAG, "Config mode response (%d bytes):", len);
-        for (int i = 0; i < len; i++) {
-            printf("%02x ", response[i]);
-        }
-        printf("\n");
-        return true;
-    } else {
-        ESP_LOGW(TAG, "No response to config mode command");
+    int len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+
+    if (!validate_response_basic(response, len, 18, expected_header, expected_tail)) {
         return false;
     }
+
+    if (!validate_response_data(response, 0x0008, 0xFF, 0x01)) {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Successfully entered configuration mode");
+    return true;
 }
 
 static bool ld2450_exit_config_mode(void)
 {
-    uint8_t end_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFE, 0x00, 0x04, 0x03, 0x02, 0x01};
-    uint8_t response[64];
-    int len;
+    const uint8_t end_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xFE, 0x00, 0x04, 0x03, 0x02, 0x01};
+    const uint8_t expected_header[] = {0xFD, 0xFC, 0xFB, 0xFA};
+    const uint8_t expected_tail[] = {0x04, 0x03, 0x02, 0x01};
+    uint8_t response[14];
 
     ESP_LOGI(TAG, "Exiting LD2450 configuration mode...");
 
     uart_write_bytes(LD2450_UART_NUM, (const char*)end_cmd, sizeof(end_cmd));
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
-    if (len > 0) {
-        ESP_LOGI(TAG, "Exit config mode response (%d bytes):", len);
-        for (int i = 0; i < len; i++) {
-            printf("%02x ", response[i]);
-        }
-        printf("\n");
-        return true;
-    } else {
-        ESP_LOGW(TAG, "No response to exit config mode command");
+    int len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+
+    if (!validate_response_basic(response, len, 14, expected_header, expected_tail)) {
         return false;
     }
+
+    if (!validate_response_data(response, 0x0004, 0xFE, 0x01)) {
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Successfully exited configuration mode");
+    return true;
 }
+
 
 static bool ld2450_read_mac_address(uint8_t *mac_addr)
 {
     const uint8_t mac_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xA5, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
     const uint8_t expected_header[] = {0xFD, 0xFC, 0xFB, 0xFA};
-    uint8_t response[64];
-    bool success = false;
+    const uint8_t expected_tail[] = {0x04, 0x03, 0x02, 0x01};
+    uint8_t response[20];
 
     ESP_LOGI(TAG, "Reading LD2450 MAC address...");
 
@@ -120,85 +178,54 @@ static bool ld2450_read_mac_address(uint8_t *mac_addr)
 
     int len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
 
-    if (len == 20) {
-        if (memcmp(response, expected_header, sizeof(expected_header)) == 0) {
-            uint16_t data_length = response[4] | (response[5] << 8);
-            if (response[6] == 0xA5 && response[7] == 0x01) {
-                uint16_t ack_status = response[8] | (response[9] << 8);
-
-                if (ack_status == 0x0000) {
-                    memcpy(mac_addr, &response[10], 6);
-
-                    ESP_LOGI(TAG, "LD2450 MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
-                             mac_addr[0], mac_addr[1], mac_addr[2],
-                             mac_addr[3], mac_addr[4], mac_addr[5]);
-                    success = true;
-                } else {
-                    ESP_LOGW(TAG, "MAC address request failed, ACK status: 0x%04x", ack_status);
-                }
-            } else {
-                ESP_LOGW(TAG, "Invalid command word in response: 0x%02X%02X (expected A501)",
-                         response[7], response[6]);
-            }
-        } else {
-            ESP_LOGW(TAG, "Invalid MAC response header");
-        }
-    } else {
-        ESP_LOGW(TAG, "Invalid MAC response length: %d bytes (expected 20)", len);
-        if (len > 0) {
-            ESP_LOGD(TAG, "Received data: ");
-            for (int i = 0; i < len; i++) {
-                printf("%02x ", response[i]);
-            }
-            printf("\n");
-        }
+    if (!validate_response_basic(response, len, 20, expected_header, expected_tail)) {
+        return false;
     }
 
-    return success;
-}
+    if (!validate_response_data(response, 0x000A, 0xA5, 0x01)) {
+        return false;
+    }
 
+    memcpy(mac_addr, &response[10], 6);
+    ESP_LOGI(TAG, "LD2450 MAC Address: %02X %02X %02X %02X %02X %02X",
+             mac_addr[0], mac_addr[1], mac_addr[2],
+             mac_addr[3], mac_addr[4], mac_addr[5]);
+    return true;
+}
 
 static bool ld2450_read_firmware_version(char *version_str, size_t max_len)
 {
-    uint8_t fw_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA0, 0x00, 0x04, 0x03, 0x02, 0x01};
-    uint8_t response[64];
-    int len;
-    bool success = false;
+    const uint8_t fw_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA0, 0x00, 0x04, 0x03, 0x02, 0x01};
+    const uint8_t expected_header[] = {0xFD, 0xFC, 0xFB, 0xFA};
+    const uint8_t expected_tail[] = {0x04, 0x03, 0x02, 0x01};
+    uint8_t response[22];
 
     ESP_LOGI(TAG, "Reading LD2450 firmware version...");
 
     uart_write_bytes(LD2450_UART_NUM, (const char*)fw_cmd, sizeof(fw_cmd));
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
-    ESP_LOGI(TAG, "Firmware response received: %d bytes", len);
+    int len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
 
-    if (len > 0) {
-        ESP_LOGD(TAG, "Full firmware response dump:");
-        for (int i = 0; i < len; i++) {
-            printf("%02x ", response[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-        printf("\n");
-
-        if (len >= 18) {
-            uint8_t major = response[13];
-            uint8_t minor = response[12];
-            char build[16];
-            snprintf(build, sizeof(build), "%02x%02x%02x%02x",
-                    response[17], response[16], response[15], response[14]);
-
-            snprintf(version_str, max_len, "%d.%02d.%s", major, minor, build);
-            ESP_LOGI(TAG, "LD2450 Firmware Version: %s", version_str);
-            success = true;
-        } else {
-            ESP_LOGW(TAG, "Response too short for firmware version parsing (need 18+ bytes, got %d)", len);
-        }
-    } else {
-        ESP_LOGW(TAG, "No response to firmware version request");
+    if (!validate_response_basic(response, len, 22, expected_header, expected_tail)) {
+        return false;
     }
 
-    return success;
+    if (!validate_response_data(response, 0x000C, 0xA0, 0x01)) {
+        return false;
+    }
+
+    uint16_t firmware_type = response[10] | (response[11] << 8);
+    uint8_t major = response[13];
+    uint8_t minor = response[12];
+
+    char build[16];
+    snprintf(build, sizeof(build), "%02x%02x%02x%02x",
+            response[17], response[16], response[15], response[14]);
+
+    snprintf(version_str, max_len, "%d.%02d.%s", major, minor, build);
+    ESP_LOGI(TAG, "LD2450 Firmware Version: %s (Type: 0x%04x)", version_str, firmware_type);
+    return true;
 }
 
 static void report_attribute_to_coordinator(uint16_t attr_id)
@@ -229,7 +256,7 @@ static void ld2450_update_zigbee_mac_addr_attr(const uint8_t *mac_addr)
         return;
     }
 
-    ESP_LOGI(TAG, "Updating Zigbee attribute with MAC address: %02X:%02X:%02X:%02X:%02X:%02X",
+    ESP_LOGI(TAG, "Updating Zigbee attribute with MAC address: %02X %02X %02X %02X %02X %02X",
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
     // prepare data
@@ -377,14 +404,14 @@ static void ld2450_read_task(void *pvParameters) {
     uint8_t rx_buffer[LD2450_FRAME_SIZE];
 
     while (1) {
-        const int bytes_read = uart_read_bytes(LD2450_UART_NUM, rx_buffer, LD2450_FRAME_SIZE, pdMS_TO_TICKS(500));
+        const int bytes_read = uart_read_bytes(LD2450_UART_NUM, rx_buffer, LD2450_FRAME_SIZE, pdMS_TO_TICKS(100));
 
         if (bytes_read == LD2450_FRAME_SIZE) {
             if (memcmp(rx_buffer, RADAR_HEADER, LD2450_HEADER_SIZE) == 0) {
                 if (memcmp(&rx_buffer[LD2450_FRAME_SIZE - 2], RADAR_TAIL, 2) == 0) {
                     if (xSemaphoreTake(radar_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                         for (int target = 0; target < 3; target++) {
-                            uint8_t *target_data = &rx_buffer[4 + target * 8];
+                            const uint8_t *target_data = &rx_buffer[4 + target * 8];
 
                             bool has_data = false;
                             for (int i = 0; i < 8; i++) {
@@ -395,9 +422,9 @@ static void ld2450_read_task(void *pvParameters) {
                             }
 
                             if (has_data) {
-                                uint16_t raw_x = (target_data[1] << 8) | target_data[0];
-                                uint16_t raw_y = (target_data[3] << 8) | target_data[2];
-                                uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
+                                const uint16_t raw_x = (target_data[1] << 8) | target_data[0];
+                                const uint16_t raw_y = (target_data[3] << 8) | target_data[2];
+                                const uint16_t raw_speed = (target_data[5] << 8) | target_data[4];
 
                                 #define CONVERT_SIGNED(raw_val) \
                                     ((raw_val & 0x8000) ? (int16_t)(raw_val & 0x7FFF) : -(int16_t)(raw_val & 0x7FFF))
@@ -427,8 +454,6 @@ static void ld2450_read_task(void *pvParameters) {
             uart_flush_input(LD2450_UART_NUM);
             ESP_LOGW(TAG, "Incomplete frame received (%d bytes), flushing buffer", bytes_read);
         }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
