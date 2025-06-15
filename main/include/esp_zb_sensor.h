@@ -35,7 +35,8 @@
 #define LD2450_RX_PIN           4
 #define LD2450_BAUD_RATE        256000
 
-#define LD2450_VERSION_ATTR_ID 0x04 // test
+#define LD2450_MAC_ADDRESS_ATTR_ID 0x01
+#define LD2450_VERSION_ATTR_ID 0x04
 
 #define ESP_ZB_ZED_CONFIG()                                         \
     {                                                               \

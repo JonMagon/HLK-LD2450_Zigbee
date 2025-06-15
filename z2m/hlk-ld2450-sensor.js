@@ -3,7 +3,7 @@ import * as m from "zigbee-herdsman-converters/lib/modernExtend";
 import * as reporting from "zigbee-herdsman-converters/lib/reporting";
 
 const CUSTOM_CLUSTER_ID = 0xFC00;
-const CUSTOM_ATTRIBUTE_ID = 0x0001;
+const LD2450_MAC_ADDRESS_ATTR_ID = 0x0001;
 const ENDPOINT = 10;
 
 const LD2450_VERSION_ATTR_ID = 0x04;
@@ -26,7 +26,7 @@ export default {
         m.deviceAddCustomCluster("customCluster", {
             ID: 0xFC00,
             attributes: {
-                customByte: {ID: 0x0001, type: 0x20},
+                macAddress: {ID: LD2450_MAC_ADDRESS_ATTR_ID, type: 0x41},
                 firmwareVersion: {ID: LD2450_VERSION_ATTR_ID, type: 0x42},
 
                 ...((() => {
@@ -43,27 +43,15 @@ export default {
             commands: {},
             commandsResponse: {},
         }),
-
-        m.numeric({
-            name: "custom_byte",
-            cluster: "customCluster",
-            attribute: "customByte",
-            description: "LED Color test byte",
-            valueMin: 0,
-            valueMax: 255,
-            endpoint: "custom",
-        }),
-
-        m.text({
-            name: "LD2450_firmware_version",
-            cluster: "customCluster",
-            attribute: "firmwareVersion",
-            description: "LD2450 Radar Firmware Version",
-            endpoint: "custom",
-        }),
     ],
 
     exposes: [
+        exposes.text('LD2450_Mac_Address', exposes.access.STATE)
+            .withDescription('LD2450 Radar MAC Address'),
+
+        exposes.text('LD2450_Firmware_Version', exposes.access.STATE)
+            .withDescription('LD2450 Radar Firmware Version'),
+
         (() => {
             let trackingComposite = exposes.composite('tracking', 'tracking', exposes.access.STATE)
                 .withDescription('Radar tracking system');
@@ -91,24 +79,29 @@ export default {
         }
 
         await reporting.bind(endpoint, coordinatorEndpoint, ["customCluster"]);
-
-        await endpoint.configureReporting("customCluster", [
-            {
-                attribute: "customByte",
-                minimumReportInterval: 1,
-                maximumReportInterval: 3600,
-                reportableChange: 1
-            },
-            {
-                attribute: "firmwareVersion",
-                minimumReportInterval: 1,
-                maximumReportInterval: 86400,
-                reportableChange: 0
-            }
-        ]);
     },
 
     fromZigbee: [
+        {
+            cluster: 'customCluster',
+            type: ["attributeReport", "readResponse"],
+            convert: (model, msg, publish, options, meta) => {
+                const result = {};
+
+                if (msg.data.hasOwnProperty('macAddress')) {
+                    const macData = msg.data.macAddress;
+                    result.LD2450_Mac_Address = Array.from(macData)
+                        .map(byte => byte.toString(16).padStart(2, '0').toUpperCase())
+                        .join(' ');
+                }
+
+                if (msg.data.hasOwnProperty('firmwareVersion')) {
+                    result.LD2450_Firmware_Version = msg.data.firmwareVersion;
+                }
+
+                return result;
+            },
+        },
         {
             cluster: 'customCluster',
             type: 'write',
@@ -159,13 +152,6 @@ export default {
 
                 if (Object.keys(trackingData).length > 0) {
                     result.tracking = trackingData;
-                }
-
-                if (msg.data.hasOwnProperty('customByte')) {
-                    result.custom_byte = msg.data.customByte;
-                }
-                if (msg.data.hasOwnProperty('firmwareVersion')) {
-                    result.LD2450_firmware_version = msg.data.firmwareVersion;
                 }
 
                 return result;

@@ -106,6 +106,58 @@ static bool ld2450_exit_config_mode(void)
     }
 }
 
+static bool ld2450_read_mac_address(uint8_t *mac_addr)
+{
+    const uint8_t mac_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x04, 0x00, 0xA5, 0x00, 0x01, 0x00, 0x04, 0x03, 0x02, 0x01};
+    const uint8_t expected_header[] = {0xFD, 0xFC, 0xFB, 0xFA};
+    uint8_t response[64];
+    bool success = false;
+
+    ESP_LOGI(TAG, "Reading LD2450 MAC address...");
+
+    uart_write_bytes(LD2450_UART_NUM, (const char*)mac_cmd, sizeof(mac_cmd));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    int len = uart_read_bytes(LD2450_UART_NUM, response, sizeof(response), pdMS_TO_TICKS(100));
+
+    if (len == 20) {
+        if (memcmp(response, expected_header, sizeof(expected_header)) == 0) {
+            uint16_t data_length = response[4] | (response[5] << 8);
+            if (response[6] == 0xA5 && response[7] == 0x01) {
+                uint16_t ack_status = response[8] | (response[9] << 8);
+
+                if (ack_status == 0x0000) {
+                    memcpy(mac_addr, &response[10], 6);
+
+                    ESP_LOGI(TAG, "LD2450 MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+                             mac_addr[0], mac_addr[1], mac_addr[2],
+                             mac_addr[3], mac_addr[4], mac_addr[5]);
+                    success = true;
+                } else {
+                    ESP_LOGW(TAG, "MAC address request failed, ACK status: 0x%04x", ack_status);
+                }
+            } else {
+                ESP_LOGW(TAG, "Invalid command word in response: 0x%02X%02X (expected A501)",
+                         response[7], response[6]);
+            }
+        } else {
+            ESP_LOGW(TAG, "Invalid MAC response header");
+        }
+    } else {
+        ESP_LOGW(TAG, "Invalid MAC response length: %d bytes (expected 20)", len);
+        if (len > 0) {
+            ESP_LOGD(TAG, "Received data: ");
+            for (int i = 0; i < len; i++) {
+                printf("%02x ", response[i]);
+            }
+            printf("\n");
+        }
+    }
+
+    return success;
+}
+
+
 static bool ld2450_read_firmware_version(char *version_str, size_t max_len)
 {
     uint8_t fw_cmd[] = {0xFD, 0xFC, 0xFB, 0xFA, 0x02, 0x00, 0xA0, 0x00, 0x04, 0x03, 0x02, 0x01};
@@ -160,7 +212,7 @@ static void report_attribute_to_coordinator(uint16_t attr_id)
     report_attr_cmd.zcl_basic_cmd.src_endpoint = HA_ESP_SENSOR_ENDPOINT;
 
     esp_zb_lock_acquire(portMAX_DELAY);
-    esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
+    const esp_err_t ret = esp_zb_zcl_report_attr_cmd_req(&report_attr_cmd);
     esp_zb_lock_release();
 
     if (ret != ESP_OK) {
@@ -168,6 +220,33 @@ static void report_attribute_to_coordinator(uint16_t attr_id)
     } else {
         ESP_LOGI(TAG, "Report attribute command sent successfully");
     }
+}
+
+static void ld2450_update_zigbee_mac_addr_attr(const uint8_t *mac_addr)
+{
+    if (mac_addr == NULL) {
+        ESP_LOGW(TAG, "Invalid MAC address");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Updating Zigbee attribute with MAC address: %02X:%02X:%02X:%02X:%02X:%02X",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+
+    // prepare data
+    uint8_t data[7];
+    data[0] = 6;
+    memcpy(data + 1, mac_addr, 6);
+
+    esp_zb_zcl_set_attribute_val(
+        HA_ESP_SENSOR_ENDPOINT,
+        CUSTOM_CLUSTER_ID,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        LD2450_MAC_ADDRESS_ATTR_ID,
+        data,
+        false
+    );
+
+    report_attribute_to_coordinator(LD2450_MAC_ADDRESS_ATTR_ID);
 }
 
 static void ld2450_update_zigbee_fw_version_attr(const char *version_str)
@@ -204,9 +283,14 @@ static void ld2450_update_zigbee_fw_version_attr(const char *version_str)
 
 static void ld2450_get_fw_version_and_update_zigbee(void)
 {
+    uint8_t mac_addr[6] = {0};
     char version_str[32] = {0};
 
     if (ld2450_enter_config_mode()) {
+        if (ld2450_read_mac_address(mac_addr)) {
+            ld2450_update_zigbee_mac_addr_attr(mac_addr);
+        }
+
         if (ld2450_read_firmware_version(version_str, sizeof(version_str))) {
             ld2450_update_zigbee_fw_version_attr(version_str);
         }
@@ -551,27 +635,23 @@ static void esp_zb_task(void *pvParameters)
     esp_zb_attribute_list_t *esp_zb_on_off_cluster = esp_zb_on_off_cluster_create(&on_off_cfg);
     esp_zb_cluster_list_add_on_off_cluster(cluster_list, esp_zb_on_off_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-    //
     esp_zb_attribute_list_t *custom_attr = esp_zb_zcl_attr_list_create(CUSTOM_CLUSTER_ID);
-    uint8_t custom_value = 0xf0;
-    uint8_t custom_string[CUSTOM_STRING_MAX_SIZE] = "_ESPRESSIF";
-    custom_string[0] = CUSTOM_STRING_MAX_SIZE - 1;
-    uint32_t custom_array[] = {1, 2, 3, 4, 5};
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x01, ESP_ZB_ZCL_ATTR_TYPE_U8, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, &custom_value);
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x02, ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, custom_string);
-    esp_zb_custom_cluster_add_custom_attr(custom_attr, 0x03, ESP_ZB_ZCL_ATTR_TYPE_32BIT_ARRAY, ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE, custom_array);
+
+    /* HLK-LD2450 params */
+
+    uint8_t mac_address[7] = {0};
+    mac_address[0] = 0;
+    esp_zb_custom_cluster_add_custom_attr(custom_attr, LD2450_MAC_ADDRESS_ATTR_ID, ESP_ZB_ZCL_ATTR_TYPE_OCTET_STRING,
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, &mac_address);
 
     char fw_version[32] = {0};
     fw_version[0] = 0;
     esp_zb_custom_cluster_add_custom_attr(custom_attr, LD2450_VERSION_ATTR_ID, ESP_ZB_ZCL_ATTR_TYPE_CHAR_STRING,
-                                         ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
+        ESP_ZB_ZCL_ATTR_ACCESS_READ_ONLY | ESP_ZB_ZCL_ATTR_ACCESS_REPORTING, fw_version);
 
     esp_zb_cluster_list_add_custom_cluster(cluster_list, custom_attr, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-
-    //
-
-    esp_zb_endpoint_config_t endpoint_config = {
+    const esp_zb_endpoint_config_t endpoint_config = {
         .endpoint = HA_ESP_SENSOR_ENDPOINT,
         .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
         .app_device_id = ESP_ZB_HA_CUSTOM_ATTR_DEVICE_ID,
@@ -593,10 +673,10 @@ static void esp_zb_task(void *pvParameters)
 
     esp_zb_device_register(ep_list);
 
-    esp_zb_zcl_custom_cluster_handlers_t obj = {.cluster_id = CUSTOM_CLUSTER_ID,
-                                                .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
-                                                .check_value_cb = esp_zb_zcl_cluster_check_value_handler,
-                                                .write_attr_cb = esp_zb_zcl_cluster_write_attr_handler};
+    const esp_zb_zcl_custom_cluster_handlers_t obj = {.cluster_id = CUSTOM_CLUSTER_ID,
+        .cluster_role = ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        .check_value_cb = esp_zb_zcl_cluster_check_value_handler,
+        .write_attr_cb = esp_zb_zcl_cluster_write_attr_handler};
     esp_zb_zcl_custom_cluster_handlers_update(obj);
 
     esp_zb_core_action_handler_register(zb_action_handler);
